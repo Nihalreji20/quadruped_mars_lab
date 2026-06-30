@@ -1,0 +1,116 @@
+<?xml version="1.0" ?>
+<robot name="final_simulation_v4" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="materials.xacro" />
+<xacro:include filename="final_simulation_v4.trans" />
+<xacro:include filename="final_simulation_v4.gazebo" />
+
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.03392615680744438 0.04828024958793435 0.005334233287975352" rpy="0 0 0"/>
+    <mass value="0.5276626997913985"/>
+    <inertia ixx="0.000329" iyy="0.000239" izz="0.000496" ixy="-8e-06" iyz="3e-06" ixz="1.3e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="coxa_1">
+  <inertial>
+    <origin xyz="-0.038701397339333886 -0.0018989630223521167 0.021945274355698992" rpy="0 0 0"/>
+    <mass value="0.6382038528604967"/>
+    <inertia ixx="0.000293" iyy="0.000491" izz="0.000335" ixy="-2.9e-05" iyz="-5e-06" ixz="-3e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.025 -0.034751 0.01255" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/coxa_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.025 -0.034751 0.01255" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/coxa_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="femur_v2_1">
+  <inertial>
+    <origin xyz="-0.053999831338292587 0.025085372227914567 -2.938162444246495e-08" rpy="0 0 0"/>
+    <mass value="0.4089318698446209"/>
+    <inertia ixx="0.000226" iyy="0.000392" izz="0.000582" ixy="0.0" iyz="-0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.0275 -0.008801 -0.019699" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/femur_v2_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.0275 -0.008801 -0.019699" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/femur_v2_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="tibia_1">
+  <inertial>
+    <origin xyz="-0.0019242581351224253 0.021005363887968212 -0.021396411112111616" rpy="0 0 0"/>
+    <mass value="0.47890735770784093"/>
+    <inertia ixx="0.000547" iyy="0.00054" izz="9.5e-05" ixy="5e-06" iyz="-3.3e-05" ixz="-9e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.1355 -0.008801 -0.019699" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/tibia_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.1355 -0.008801 -0.019699" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/tibia_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="Revolute 1" type="revolute">
+  <origin xyz="0.025 0.034751 -0.01255" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="coxa_1"/>
+  <axis xyz="0.0 -0.0 1.0"/>
+  <limit upper="0.349066" lower="-0.349066" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolute 2" type="revolute">
+  <origin xyz="-0.0525 -0.02595 0.032249" rpy="0 0 0"/>
+  <parent link="coxa_1"/>
+  <child link="femur_v2_1"/>
+  <axis xyz="-0.0 1.0 0.0"/>
+  <limit upper="1.570796" lower="-0.785398" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolute 3" type="revolute">
+  <origin xyz="-0.108 0.0 0.0" rpy="0 0 0"/>
+  <parent link="femur_v2_1"/>
+  <child link="tibia_1"/>
+  <axis xyz="-0.0 -1.0 -0.0"/>
+  <limit upper="0.785398" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+</robot>

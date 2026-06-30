@@ -1,0 +1,86 @@
+Created At: 2026-06-09T09:21:23Z
+Completed At: 2026-06-09T09:21:24Z
+File Path: `file:///c:/Users/nihal/OneDrive/Desktop/iot%20lab/final/FREE_BASE_TWO_STEP_TEST.py`
+Total Lines: 442
+Total Bytes: 19086
+Showing lines 1 to 442
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: #!/usr/bin/env python3
+2: """
+3: FREE_BASE_TWO_STEP_TEST.py
+4: ==========================
+5: Stage 6B -- Four-Step Full Crawl Gait Validation  (1 -> 2 -> 4 -> 3)
+6: 
+7: CHANGES FROM THE TWO-STEP VERSION
+8:     The original file only implemented Steps 1 and 2.  Steps 3 and 4 have
+9:     been added using the EXACT same pattern as Steps 1 and 2 — identical
+10:     lift formula, identical sweep formula, identical translate formula.
+11:     No new logic was introduced.
+12: 
+13:     Specific changes:
+14:       1. generate_two_step_sequence() renamed generate_full_gait_sequence()
+15:          and extended with Steps 3 (Leg 4) and 4 (Leg 3) — each block is a
+16:          copy-paste of the Step 1/2 block with only the leg-id and phase-name
+17:          strings changed.
+18: 
+19:       2. main() execution loop updated:
+20:          - current_step_context now tracks 1-4 instead of 1-2.
+21:          - active_leg map extended to cover steps 3 and 4.
+22:          - Diagnostic dicts and boundary keys extended for STEP_3 / STEP_4.
+23:          - Final report prints all four step displacements and pass/fail uses
+24:            STEP_4 as the terminal boundary.
+25:          - pass_additive checks disp_total > disp1 (same logic, wider span).
+26: 
+27:     Everything else — LEG_CONFIG, IK solver, sign tables, RADIAL_REACH
+28:     conversion, LIFT/SWEEP/LOWER formulae, translate formula — is
+29:     character-for-character identical to crawl_gait_test.py.
+30: 
+31: GAIT ORDER
+32:     1 (FL) -> 2 (BR) -> 4 (BL) -> 3 (FR)
+33: """
+34: 
+35: 
+<truncated 17640 bytes>
+roll.values())
+402:     overall_max_pitch = max(max_pitch.values())
+403: 
+404:     print(f"  [Final Report]")
+405:     print(f"  1. Total Displacement             : {disp_total:.1f} mm")
+406:     print(f"  2. Overall Max Roll               : {overall_max_roll:.1f}°")
+407:     print(f"  3. Overall Max Pitch              : {overall_max_pitch:.1f}°")
+408:     print(f"  4. Maximum Joint Error            : {max_joint_error:.1f}°")
+409:     print(f"  5. IK Failures                    : {ik_failures}")
+410:     print(f"  6. Height Drift                   : {max_z_drift:.3f} m")
+411: 
+412:     overall = pass_ik and pass_fall and pass_err and pass_additive
+413: 
+414:     print("\n" + "=" * 70)
+415:     if overall:
+416:         print("  STAGE 6B COMPLETE — FULL CRAWL GAIT VALIDATED.")
+417:         print("  Robot preserved stance state across all four steps and gained")
+418:         print("  additive displacement using Stage 4 sine-wave lift mechanics.")
+419:     else:
+420:         reasons = []
+421:         if not pass_ik:       reasons.append(f"IK failures: {ik_failures}")
+422:         if not pass_fall:     reasons.append(f"Robot fell below {MIN_Z_HEIGHT_M} m")
+423:         if not pass_err:      reasons.append(f"Joint error {max_joint_error:.1f}° > {MAX_JOINT_ERR_DEG}°")
+424:         if not pass_additive: reasons.append("Step 4 did not produce additive displacement over Step 1")
+425:         print("  STAGE 6B FAILED.")
+426:         for r in reasons:
+427:             print(f"    - {r}")
+428: 
+429:     print("\n  Holding final posture. Close window to exit.")
+430: 
+431:     try:
+432:         while p.isConnected():
+433:             p.stepSimulation()
+434:             time.sleep(1.0 / CONTROL_RATE_HZ)
+435:     except (KeyboardInterrupt, p.error):
+436:         pass
+437:     finally:
+438:         if p.isConnected():
+439:             p.disconnect()
+440: 
+441: if __name__ == "__main__":
+442:     main()
+The above content shows the entire, complete file contents of the requested file.
