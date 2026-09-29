@@ -45,7 +45,8 @@ class IMUBase:
         raise NotImplementedError
 
     def get_angular_velocity(self):
-        """Return (wx, wy, wz) angular velocity in deg/s."""
+        """Return (wx, wy, wz) angular velocity in deg/s, BODY frame
+        (sensor axes aligned with base_link axes), as a strapdown gyro reports."""
         raise NotImplementedError
 
     def get_telemetry_string(self):
@@ -140,10 +141,19 @@ class SimulatedIMU(IMUBase):
         pos, orn = self._p.getBasePositionAndOrientation(self._robot_id)
         euler_rad = self._p.getEulerFromQuaternion(orn)  # (roll, pitch, yaw) radians
         vel_lin, vel_ang = self._p.getBaseVelocity(self._robot_id)
-        # vel_ang is world-frame rad/s; convert to deg/s
-        wx_gt = math.degrees(vel_ang[0])
-        wy_gt = math.degrees(vel_ang[1])
-        wz_gt = math.degrees(vel_ang[2])
+        # PyBullet returns WORLD-frame angular velocity. A real strapdown gyro
+        # (BNO055 / ICM-20948) measures in the SENSOR/BODY frame, so rotate
+        # into the body frame: w_body = R^T @ w_world  (R = body->world).
+        # Without this, wx/wy change meaning with heading: at the yaw=pi spawn
+        # wx_world = -roll_rate, and at yaw=+-90 deg wx_world is the PITCH rate.
+        R = self._p.getMatrixFromQuaternion(orn)   # row-major 3x3
+        wxw, wyw, wzw = vel_ang
+        wx_b = R[0] * wxw + R[3] * wyw + R[6] * wzw
+        wy_b = R[1] * wxw + R[4] * wyw + R[7] * wzw
+        wz_b = R[2] * wxw + R[5] * wyw + R[8] * wzw
+        wx_gt = math.degrees(wx_b)
+        wy_gt = math.degrees(wy_b)
+        wz_gt = math.degrees(wz_b)
 
         roll_gt  = math.degrees(euler_rad[0])
         pitch_gt = math.degrees(euler_rad[1])
@@ -183,7 +193,7 @@ class SimulatedIMU(IMUBase):
         return (self._roll, self._pitch, self._yaw)
 
     def get_angular_velocity(self):
-        """Return (wx, wy, wz) in deg/s  (world frame)."""
+        """Return (wx, wy, wz) in deg/s  (BODY frame, like a real gyro)."""
         return (self._wx, self._wy, self._wz)
 
     def reset_yaw_reference(self):

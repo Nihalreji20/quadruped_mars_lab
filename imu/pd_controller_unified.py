@@ -94,56 +94,117 @@ LIFT_HEIGHT_TURN = 12.0     # mm  (6B low turning lift)
 APEX_PZ_TURN     = STAND_PZ + LIFT_HEIGHT_TURN
 STEP_LENGTH_TURN = 40.0     # mm  (Reduced to restrict coxa angle max extent)
 
-# IMU telemetry print interval (steps)
+# IMU telemetry print interval (steps) 
 IMU_PRINT_INTERVAL = 48   # ~5 Hz at 240 Hz sim rate
 
 # ============================================================================
-# SECTION 1b — DYNAMIC POSTURE CONTROLLER CONFIG  (Roll PD, MVP)
+# SECTION 1b — DYNAMIC POSTURE CONTROLLER CONFIG  (Roll + Pitch PD)
 # ============================================================================
-# Minimum-viable Roll PD posture controller. Injects ONLY Δpz corrections into
-# the existing IK targets. Pitch interface is present but disabled (gains = 0).
+# Roll + pitch PD posture controller. Injects ONLY per-leg Δpz corrections into
+# the locomotion-owned IK targets. Never touches px/py, gait sequencing, or
+# trajectories.
 #
-# Pipeline:  IMU Roll → EMA filter → deadband → Roll PD → clamp → mixing → Δpz
+# Pipeline:
+#   IMU (roll, pitch, body gyro) → level-ref subtraction → EMA filter
+#     → soft deadband → PD (D on Euler rate from body gyro) → clamp
+#     → geometry mixing → per-leg authority fade (swing exclusion) → Δpz
 #
-# Δpz authority is sized inside the IK-reachable Z envelope (verified against
-# compute_ik): below STAND_PZ the leg can extend ~59mm (forward, px=158) and
-# ~45mm (turning, px=180). Limits below stay well inside both.
+# Conventions — VERIFIED numerically in PyBullet (see VERIFY notes below):
+#   roll  = rotation about body +X.  +roll RAISES the +Y side (legs 2,3).
+#   pitch = rotation about body +Y.  +pitch LOWERS the +X side (legs 2,4).
+#   Δpz > 0 moves the foot UP relative to the hip → body LOWERS at that leg.
+#   Gyro is BODY frame (imu_module rotates PyBullet's world-frame ω).
 POSTURE_ENABLED = True          # master switch; False → controller outputs zeros
 
 # Control timestep: simulation time advanced per outer tick (NOT wall-clock).
-# One outer tick steps physics SIM_SUBSTEPS times at 240 Hz.
-POSTURE_DT = SIM_SUBSTEPS / 240.0      # seconds per control tick
+POSTURE_DT = SIM_SUBSTEPS / 240.0      # seconds per control tick (12.5 ms)
 
 # EMA low-pass smoothing factors (0..1). Higher = less smoothing, faster.
-POSTURE_EMA_ALPHA_ANGLE = 0.20  # roll/pitch angle filter
-POSTURE_EMA_ALPHA_GYRO  = 0.30  # angular-rate (D-term) filter
+POSTURE_EMA_ALPHA_ANGLE = 0.35  # roll/pitch angle filter
+POSTURE_EMA_ALPHA_GYRO  = 0.15  # angular-rate (D-term) filter; heavier than the
+                                # angle filter so foot-touchdown rate spikes
+                                # don't pump Δpz (0.30 raised walking peaks 3x)
 
-# Deadband half-width (deg). Inside ±this, error is forced to 0 (no hunting).
-POSTURE_DEADBAND_DEG = 2.0
+# Soft deadband half-width (deg). Output is continuous at the band edge:
+#   e_db = sign(e) * max(|e| - db, 0)
+POSTURE_DEADBAND_DEG = 0.5
 
-# Roll PD gains (mm of Δpz per deg of error, and per deg/s of rate).
-POSTURE_KP_ROLL = 0.9
-POSTURE_KD_ROLL = 0.06
+# PD gains — mm of Δpz per deg of error (Kp) and per deg/s of Euler rate (Kd).
+# Tuned in sim (see TUNING NOTES at the end of this section).
+POSTURE_KP_ROLL  = 6.0
+POSTURE_KD_ROLL  = 0.02
+POSTURE_KP_PITCH = 4.5
+POSTURE_KD_PITCH = 0.02
 
-# Roll correction polarity. The required sign depends on the IMU's roll
-# convention (what sign get_euler_deg() reports for a LEFT lean) AND on the
-# Δpz→body-Z direction. Bench check: tilt the body LEFT by hand, watch the
-# ROLL-PD overlay. If the robot pushes itself MORE over (roll grows), flip this
-# to -1.0. If it rights itself (roll shrinks toward 0), leave it +1.0.
-# This is the ONLY place to change for IMU sign — the mixing grouping below is
-# geometry-fixed and correct regardless.
-POSTURE_ROLL_POLARITY = +1.0
+# Integral term (mm of Δpz per deg·s of error). Removes the steady-state tilt
+# a PD leaves on a slope. Kept SLOW on purpose: integral time Ti = Kp/Ki is
+# ~0.5 s, >10x slower than the ~30 ms P loop, so the I-term's phase lag sits
+# far below the loop's crossover and does not erode its stability margin.
+POSTURE_KI_ROLL  = 12.0          # Ti = 6.0/12  = 0.5 s
+POSTURE_KI_PITCH = 9.0           # Ti = 4.5/9   = 0.5 s
+# Anti-windup:
+#   * clamp: |I contribution| ≤ POSTURE_I_MAX_MM
+#   * conditional integration: frozen while the output is saturated in the
+#     direction the error would push it, and on any tick an IK target was
+#     infeasible (report_ik()).
+#   * integration uses the DEADBANDED error, so it never hunts inside ±db.
+POSTURE_I_MAX_MM = 20.0
+# Where to integrate: "stand" = only while all four feet are down (STOP);
+# while walking the I-state is HELD (not integrated, not reset), so a slope
+# estimate learned while standing carries into walking.
+# "always" = integrate during walking too.
+POSTURE_I_MODE = "stand"
+# Slow leak toward 0 (time constant, s) so a stale slope estimate fades.
+POSTURE_I_LEAK_TAU = 20.0
 
-# Pitch PD gains — interface present, DISABLED for MVP (return zero output).
-POSTURE_KP_PITCH = 0.0
-POSTURE_KD_PITCH = 0.0
+# Pitch mixing mode:
+#   "symmetric"    : front/back legs get ±u (body height preserved).
+#   "retract_only" : only the HIGH side's feet are pulled up (Δpz ≥ 0).
+# Why retract_only: with this URDF, a Δpz<0 (extend) command also moves the
+# foot ~2.3 mm radially INWARD per mm (knee joint turns opposite to the IK's
+# assumption; see notes). Legs sprawl along body X, so extending the
+# downhill legs on a fore-aft slope shrinks the support polygon exactly on the
+# downhill side → tip-over when a downhill leg swings. Retracting moves feet
+# OUTWARD instead, so the polygon never shrinks. Roll is unaffected (radial
+# motion is along X, the roll-critical edges run along X), so roll stays
+# symmetric.
+POSTURE_PITCH_MIX = "retract_only"
 
-# Per-leg Δpz saturation (mm), mode dependent (turning envelope is tighter).
-POSTURE_DPZ_MAX_FWD  = 35.0
-POSTURE_DPZ_MAX_TURN = 25.0
+# Axis polarity: +1.0 = the geometry-derived direction (verified in sim).
+# Only flip on REAL hardware if the IMU is mounted rotated relative to base_link.
+POSTURE_ROLL_POLARITY  = +1.0
+POSTURE_PITCH_POLARITY = +1.0
+
+# Per-leg Δpz saturation (mm), mode dependent.
+POSTURE_DPZ_MAX_FWD  = 25.0
+POSTURE_DPZ_MAX_TURN = 16.7   # turning stance (px=180) has less Z authority
+
+# Swing exclusion: each leg's authority weight w∈[0,1] ramps (not steps) to 0
+# before lift-off and back to 1 after touchdown. Ticks for a full 0↔1 ramp.
+# Must be ≤ 28 (turning LOWER length) so the fade completes before lift-off.
+POSTURE_FADE_TICKS = 20
+
+# TUNING NOTES (PyBullet, 1.42 kg model, 80 Hz control, IMU noise on):
+#   Kp: forward-walk and slope metrics improve monotonically up to ~6 (roll)
+#       and ~4.5 (pitch); pitch above 4.5 raised slope-walk tilt peaks.
+#   Kd: closed-loop 3° setpoint steps — Kd=-0.02 raised overshoot (sign check
+#       passes), 0.02–0.05 trims it, 0.1 chatters, 0.2 ≈ 100% overshoot.
+#       0.02 keeps a 5–10x margin to that edge. The loop rises in ~30 ms
+#       (2–3 control ticks), so D has little bandwidth to work with.
+#   Kill switches: if parked on flat ground Δpz toggles continuously by more
+#       than ±1 mm, or a 3° step overshoots more than 50%, halve Kp/Kd.
+#       If the overlay shows SAT on most ticks while walking, the clamp
+#       (not the gains) is the limit.
 
 # Hold posture while parked (STOP). All four legs grounded, levels the body.
 POSTURE_HOLD_WHEN_STOPPED = True
+
+# Level reference capture (see main()). Legs are position-held at the stand
+# pose BEFORE the gravity settle, then the reference is averaged. If the
+# captured offset is larger than this, it is treated as a bad pose (not an
+# IMU mounting offset) and the gravity-level reference (0,0) is used instead.
+POSTURE_REF_SAMPLES = 48
+POSTURE_REF_MAX_DEG = 1.5
 
 # ============================================================================
 # SECTION 2 — LEG CONFIGURATION TABLE  (frozen — do not change)
@@ -636,8 +697,10 @@ def update_display(robot_id, leg_id, phase, px, py, pz, t,
         dpz = d["dpz"]
         lines.append((
             "posture",
-            f"ROLL-PD  rf:{d['roll_f']:+5.2f}  u:{d['u_roll']:+5.2f}  "
-            f"Δpz[{dpz[1]:+4.1f} {dpz[2]:+4.1f} {dpz[3]:+4.1f} {dpz[4]:+4.1f}]",
+            f"PD  R:{d['roll_f']:+5.2f} uR:{d['u_roll']:+5.2f}  "
+            f"P:{d['pitch_f']:+5.2f} uP:{d['u_pitch']:+5.2f}  "
+            f"Δpz[{dpz[1]:+4.1f} {dpz[2]:+4.1f} {dpz[3]:+4.1f} {dpz[4]:+4.1f}]"
+            f"{'  SAT' if d.get('sat') else ''}",
             [tx, ty, tz+0.02], [0.6, 0.9, 1.0], 1.1))
 
     for key, text, pos, color, size in lines:
@@ -667,80 +730,130 @@ def update_camera():
         pass
 
 # ============================================================================
-# SECTION 8b — DYNAMIC POSTURE CONTROLLER  (Roll PD, MVP)
+# SECTION 8b — DYNAMIC POSTURE CONTROLLER  (Roll + Pitch PD)
 # ============================================================================
-# Closed-loop Z-admittance posture control. Reads IMU roll, produces per-leg
-# vertical corrections (Δpz) that are ADDED to the locomotion-owned pz before
-# IK. Never touches px, py, gait scheduling, trajectories, or turning logic.
+# Closed-loop Z-admittance posture control. Reads IMU roll/pitch + body gyro,
+# produces per-leg vertical corrections (Δpz) that are ADDED to the
+# locomotion-owned pz before IK. Never touches px, py, gait scheduling,
+# trajectories, or turning logic.
 #
-# The controller is a pure data-in/data-out object: it takes plain numbers and
-# returns plain numbers, holds no PyBullet handles and no robot_id. This keeps
-# locomotion and posture control fully decoupled and makes a future hardware /
-# ROS2 port a wrapper exercise with no logic change.
+# Pure data-in/data-out object (no PyBullet handles), so a hardware / ROS2
+# port is a wrapper exercise.
 #
-# Mixing matrix.
-#   ROLL groups legs by BODY-Y side (foot lateral position), which is set by
-#   the sign of hip_y in LEG_CONFIG:
-#       hip_y < 0  → legs 1,4   (foot_Y = -252 mm, same side)
-#       hip_y > 0  → legs 2,3   (foot_Y = +252 mm, same side)
-#   Legs on the same Y side take the same roll sign so their Δpz adds into a
-#   real roll moment (net moment arm ≈ 1007 mm; the opposite pairing would
-#   cancel to ~0). The overall direction is applied via POSTURE_ROLL_POLARITY
-#   so the IMU sign can be corrected in one place after a bench check.
+# Mixing (derived from LEG_CONFIG hip positions, read-only):
+#   ROLL  (about body X): moment arm = foot Y.  Legs with hip_y > 0 (2,3) are
+#         the +Y side. +roll raises +Y → push +Y legs' feet UP (Δpz>0) and
+#         -Y legs' feet DOWN (Δpz<0):   mix_roll[leg]  = sign(hip_y)
+#   PITCH (about body Y): moment arm = foot X.  +pitch lowers +X side (2,4)
+#         → +X legs' feet DOWN (Δpz<0), -X legs' feet UP:
+#                                        mix_pitch[leg] = -sign(hip_x)
+#   Both verified numerically (roll/pitch sign test + closed-loop sim).
 #
-#   NOTE: this is intentionally NOT the same grouping as get_leg_params
-#   (right=[1,3]/left=[2,4]) — that grouping drives turning stride direction,
-#   a locomotion construct, not lateral balance. Roll balance is governed by
-#   foot_Y geometry, i.e. hip_y sign, which gives {1,4} vs {2,3}.
-#
-#   PITCH groups by BODY-X side (fore/aft), set by hip_x sign:
-#       hip_x < 0  → legs 1,3 (front)
-#       hip_x > 0  → legs 2,4 (back)
-#   (Pitch terms present but multiplied by zero gains for the MVP.)
+# D-term: PD acts on the ERROR and its derivative with the SAME sign
+#   u = Kp*e + Kd*ė. ė is the Euler-angle rate computed from the BODY gyro:
+#     φ̇ = p + (q sinφ + r cosφ) tanθ ,   θ̇ = q cosφ − r sinφ
+#   This is heading-independent (the old world-frame wx was only correct at
+#   yaw = π by accident, and became the PITCH rate at yaw = ±90°).
+
+
+def _soft_deadband(e, db):
+    """Continuous deadband: 0 inside ±db, then e shifted toward 0 by db."""
+    if e > db:
+        return e - db
+    if e < -db:
+        return e + db
+    return 0.0
+
 
 class PostureController:
-    """Roll PD posture controller (pitch interface present, disabled)."""
+    """Roll + pitch PD posture controller producing per-leg Δpz (mm)."""
 
-    # ROLL signs grouped by body-Y side (1,4 same side; 2,3 same side).
-    # Base table is geometry-only; POSTURE_ROLL_POLARITY sets absolute direction.
-    _MIX_ROLL  = {1: +1.0, 4: +1.0, 3: -1.0, 2: -1.0}
-    # PITCH signs grouped by body-X side (1,3 front; 2,4 back).
-    _MIX_PITCH = {1: +1.0, 3: +1.0, 4: -1.0, 2: -1.0}
+    _MIX_ROLL  = {lid: (1.0 if cfg['hip_xyz_urdf'][1] > 0 else -1.0)
+                  for lid, cfg in LEG_CONFIG.items()}
+    _MIX_PITCH = {lid: (-1.0 if cfg['hip_xyz_urdf'][0] > 0 else 1.0)
+                  for lid, cfg in LEG_CONFIG.items()}
 
     def __init__(self):
-        # Filter state
         self._roll_f       = 0.0
         self._pitch_f      = 0.0
         self._roll_rate_f  = 0.0
         self._pitch_rate_f = 0.0
         self._initialized  = False
-        # Level reference captured at startup (subtracted from raw angles)
         self._ref_roll     = 0.0
         self._ref_pitch    = 0.0
-        # Debug snapshot
+        # Per-leg authority weight (swing exclusion ramp), 1 = full authority
+        self._w = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+        # Integral state (mm) and anti-windup flags
+        self._i_roll  = 0.0
+        self._i_pitch = 0.0
+        self._sat_prev = {"roll": 0.0, "pitch": 0.0}   # sign of saturation
+        self._ik_ok_prev = True
         self._dbg = {"u_roll": 0.0, "u_pitch": 0.0, "roll_f": 0.0,
-                     "pitch_f": 0.0, "dpz": {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}}
+                     "pitch_f": 0.0, "dpz": {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0},
+                     "w": dict(self._w), "sat": False,
+                     "i_roll": 0.0, "i_pitch": 0.0}
 
     # -- lifecycle ----------------------------------------------------------
     def reset(self):
         self.__init__()
 
     def set_level_reference(self, roll_deg, pitch_deg):
-        """Capture the 'flat' orientation measured after settle()."""
+        """Set the 'flat' orientation (IMU mounting offset)."""
         self._ref_roll  = roll_deg
         self._ref_pitch = pitch_deg
-        # Seed filters at the reference so there is no startup spike.
-        self._roll_f = 0.0
-        self._pitch_f = 0.0
-        self._roll_rate_f = 0.0
-        self._pitch_rate_f = 0.0
+        self._roll_f = self._pitch_f = 0.0
+        self._roll_rate_f = self._pitch_rate_f = 0.0
         self._initialized = True
+
+    def report_ik(self, all_ok):
+        """Main loop reports whether every corrected leg target was IK-feasible
+        this tick. Integration is frozen on the next tick if not."""
+        self._ik_ok_prev = bool(all_ok)
+
+    def _integrate(self, i_state, err_db, ki, sat_sign, allowed):
+        dt = POSTURE_DT
+        if POSTURE_I_LEAK_TAU > 0:
+            i_state *= math.exp(-dt / POSTURE_I_LEAK_TAU)
+        if not allowed or ki == 0.0:
+            return i_state
+        inc = ki * err_db * dt
+        # conditional integration: don't push further into saturation
+        if sat_sign != 0.0 and math.copysign(1.0, inc) == sat_sign:
+            return i_state
+        return max(-POSTURE_I_MAX_MM, min(POSTURE_I_MAX_MM, i_state + inc))
+
+    # -- helpers -------------------------------------------------------------
+    @staticmethod
+    def _euler_rates(roll_deg, pitch_deg, wx, wy, wz):
+        """Body rates (deg/s) → roll/pitch Euler rates (deg/s), ZYX Euler."""
+        phi, th = math.radians(roll_deg), math.radians(pitch_deg)
+        th = max(-1.4, min(1.4, th))          # keep tan() finite
+        roll_dot  = wx + (wy * math.sin(phi) + wz * math.cos(phi)) * math.tan(th)
+        pitch_dot = wy * math.cos(phi) - wz * math.sin(phi)
+        return roll_dot, pitch_dot
+
+    def _update_weights(self, gait_context):
+        """Ramp each leg's authority toward 0 (excluded) or 1 (included)."""
+        excluded = set(gait_context.get("exclude_legs", ()))
+        step = 1.0 / max(1, POSTURE_FADE_TICKS)
+        for lid in self._w:
+            target = 0.0 if lid in excluded else 1.0
+            w = self._w[lid]
+            if w < target:
+                w = min(target, w + step)
+            elif w > target:
+                w = max(target, w - step)
+            self._w[lid] = w
+        # A leg that is actually airborne gets exactly zero, never a residual.
+        swing = gait_context.get("swing_leg")
+        if swing in self._w and gait_context.get("airborne", False):
+            self._w[swing] = 0.0
 
     # -- main entry point ---------------------------------------------------
     def update(self, imu_sample, gait_context):
         """
-        imu_sample:   dict roll_deg, pitch_deg, wx, wy
-        gait_context: dict mode, swing_leg, support_legs, dpz_max
+        imu_sample:   dict roll_deg, pitch_deg, wx, wy, wz (BODY-frame deg/s)
+        gait_context: dict mode, swing_leg, airborne, exclude_legs, dpz_max
         Returns: dict {leg_id: Δpz_mm}
         """
         if not POSTURE_ENABLED:
@@ -749,13 +862,15 @@ class PostureController:
                              pitch_f=0.0, dpz=dict(zero))
             return zero
 
-        # 1) Preprocess: reference subtraction (sign convention already in IMU)
+        # 1) Error (level reference = IMU mounting offset)
         roll_err  = imu_sample["roll_deg"]  - self._ref_roll
         pitch_err = imu_sample["pitch_deg"] - self._ref_pitch
-        roll_rate  = imu_sample["wx"]
-        pitch_rate = imu_sample["wy"]
+        # 2) Euler rates from body gyro (heading independent)
+        roll_rate, pitch_rate = self._euler_rates(
+            imu_sample["roll_deg"], imu_sample["pitch_deg"],
+            imu_sample["wx"], imu_sample["wy"], imu_sample.get("wz", 0.0))
 
-        # 2) EMA low-pass filter (seed on first sample)
+        # 3) EMA low-pass
         if not self._initialized:
             self._roll_f, self._pitch_f = roll_err, pitch_err
             self._roll_rate_f, self._pitch_rate_f = roll_rate, pitch_rate
@@ -767,43 +882,94 @@ class PostureController:
             self._roll_rate_f  = g * roll_rate  + (1 - g) * self._roll_rate_f
             self._pitch_rate_f = g * pitch_rate + (1 - g) * self._pitch_rate_f
 
-        # 3) Deadband (null zone kills steady-state hunting)
+        # 4) Soft deadband on the angle error (continuous, no edge jump).
+        #    The D-term is NOT deadbanded: damping stays active near level.
         db = POSTURE_DEADBAND_DEG
-        roll_db  = 0.0 if abs(self._roll_f)  < db else self._roll_f
-        pitch_db = 0.0 if abs(self._pitch_f) < db else self._pitch_f
+        roll_db  = _soft_deadband(self._roll_f,  db)
+        pitch_db = _soft_deadband(self._pitch_f, db)
 
-        # 4) PD compute. D-term uses gyro directly (lower noise than d/dt angle).
-        #    Base roll effort; absolute direction set by POSTURE_ROLL_POLARITY
-        #    (flip that one constant if the IMU roll sign is inverted).
-        u_roll  = POSTURE_ROLL_POLARITY * (POSTURE_KP_ROLL * roll_db
-                                           - POSTURE_KD_ROLL * self._roll_rate_f)
-        # Pitch interface present but gains are 0 for the MVP → u_pitch == 0.
-        u_pitch = (POSTURE_KP_PITCH * pitch_db
-                   - POSTURE_KD_PITCH * self._pitch_rate_f)
+        # 5) Integral (anti-windup: clamp, conditional, IK-freeze, deadband)
+        standing = gait_context.get("mode") == "STOP"
+        allowed = self._ik_ok_prev and (POSTURE_I_MODE == "always" or standing)
+        self._i_roll  = self._integrate(self._i_roll,  roll_db,  POSTURE_KI_ROLL,
+                                        self._sat_prev["roll"],  allowed)
+        self._i_pitch = self._integrate(self._i_pitch, pitch_db, POSTURE_KI_PITCH,
+                                        self._sat_prev["pitch"], allowed)
 
-        # 5) Mixing matrix → raw per-leg Δpz
-        dpz = {}
-        for lid in (1, 2, 3, 4):
-            dpz[lid] = (self._MIX_ROLL[lid]  * u_roll
-                        + self._MIX_PITCH[lid] * u_pitch)
+        # 6) PID — P, I and D on the same side: u = Kp*e + I + Kd*ė
+        u_roll  = POSTURE_ROLL_POLARITY  * (POSTURE_KP_ROLL  * roll_db
+                                            + self._i_roll
+                                            + POSTURE_KD_ROLL  * self._roll_rate_f)
+        u_pitch = POSTURE_PITCH_POLARITY * (POSTURE_KP_PITCH * pitch_db
+                                            + self._i_pitch
+                                            + POSTURE_KD_PITCH * self._pitch_rate_f)
 
-        # 6) Swing-leg exclusion: airborne leg cannot push → zero its output.
-        swing = gait_context.get("swing_leg")
-        if swing in dpz:
-            dpz[swing] = 0.0
-
-        # 7) Output clamp (mode-dependent saturation, inside IK envelope)
+        # 6) Mixing + per-leg authority weights (smooth swing exclusion)
+        self._update_weights(gait_context)
         dpz_max = gait_context.get("dpz_max", POSTURE_DPZ_MAX_FWD)
-        for lid in dpz:
-            dpz[lid] = max(-dpz_max, min(dpz_max, dpz[lid]))
+        dpz, sat = {}, False
+        sat_r = sat_p = 0.0
+        for lid in (1, 2, 3, 4):
+            vp = self._MIX_PITCH[lid] * u_pitch
+            if POSTURE_PITCH_MIX == "retract_only":
+                # Same pitch moment, applied only by lifting the high side.
+                vp = max(0.0, 2.0 * vp)
+            vr = self._MIX_ROLL[lid] * u_roll
+            v = vr + vp
+            if abs(v) > dpz_max:
+                sat = True
+                v = math.copysign(dpz_max, v)
+                # which axis is pushing this leg into the limit (in u units)
+                if vr != 0.0 and math.copysign(1.0, vr) == math.copysign(1.0, v):
+                    sat_r = math.copysign(1.0, u_roll)
+                if vp != 0.0 and math.copysign(1.0, vp) == math.copysign(1.0, v):
+                    sat_p = math.copysign(1.0, u_pitch)
+            dpz[lid] = self._w[lid] * v
+        # anti-windup memory, expressed in the I-state's sign convention
+        self._sat_prev["roll"]  = sat_r * POSTURE_ROLL_POLARITY
+        self._sat_prev["pitch"] = sat_p * POSTURE_PITCH_POLARITY
 
         self._dbg.update(u_roll=u_roll, u_pitch=u_pitch,
                          roll_f=self._roll_f, pitch_f=self._pitch_f,
-                         dpz=dict(dpz))
+                         dpz=dict(dpz), w=dict(self._w), sat=sat,
+                         i_roll=self._i_roll, i_pitch=self._i_pitch)
         return dpz
 
     def get_debug_state(self):
         return self._dbg
+
+
+def posture_gait_context(mode_str, leg_id, phase, gsm, turning):
+    """Build the posture controller's view of the gait (read-only).
+
+    exclude_legs: legs whose authority should be (or ramp to) zero:
+      - the leg currently swinging (LIFT/SWEEP/LOWER)
+      - forward STABILIZE: the leg about to lift (it lifts after 40 ticks)
+      - turning LOWER: the NEXT leg in GAIT_ORDER (6B lifts it immediately
+        after this LOWER ends, with no STABILIZE in between)
+    """
+    airborne = phase in ("LIFT", "SWEEP", "LOWER")
+    exclude = [leg_id]
+    if turning and phase == "LOWER":
+        order = gsm.gait_order
+        exclude.append(order[(order.index(leg_id) + 1) % len(order)])
+    return {
+        "mode": mode_str,
+        "swing_leg": leg_id,
+        "airborne": airborne,
+        "exclude_legs": exclude,
+        "dpz_max": POSTURE_DPZ_MAX_TURN if turning else POSTURE_DPZ_MAX_FWD,
+    }
+
+
+def set_leg_with_posture(robot_id, lid, px, py, pz_loco, dpz):
+    """Command a leg with the posture correction; if that target is outside
+    the IK envelope, fall back to the pure locomotion target (exactly what the
+    gait would have commanded) so the leg never freezes. Returns
+    (ok_with_correction, ok_final)."""
+    if set_leg(robot_id, lid, px, py, pz_loco + dpz):
+        return True, True
+    return False, set_leg(robot_id, lid, px, py, pz_loco)
 
 # ============================================================================
 # SECTION 9 — UNIFIED MAIN LOOP
@@ -887,21 +1053,28 @@ def run_unified_sim(robot_id, imu, posture):
 
                 if POSTURE_HOLD_WHEN_STOPPED:
                     roll_deg, pitch_deg, _yaw = imu.get_euler_deg()
-                    wx, wy, _wz = imu.get_angular_velocity()
+                    wx, wy, wz = imu.get_angular_velocity()
                     imu_sample = {"roll_deg": roll_deg, "pitch_deg": pitch_deg,
-                                  "wx": wx, "wy": wy}
+                                  "wx": wx, "wy": wy, "wz": wz}
                     gait_context = {
                         "mode": "STOP",
                         "swing_leg": None,          # all four grounded
-                        "support_legs": [1, 2, 3, 4],
+                        "airborne": False,
+                        "exclude_legs": (),
                         "dpz_max": POSTURE_DPZ_MAX_FWD,
                     }
                     corr = posture.update(imu_sample, gait_context)
+                    all_ok = True
                     for lid in range(1, 5):
                         base_px = foot_targets[lid]["px"]
                         base_py = foot_targets[lid]["py"]
-                        pz_ik   = foot_targets[lid]["pz"] + corr[lid]
-                        set_leg(robot_id, lid, base_px, base_py, pz_ik)
+                        ok_c, _ = set_leg_with_posture(
+                            robot_id, lid, base_px, base_py,
+                            foot_targets[lid]["pz"], corr[lid])
+                        if not ok_c:
+                            total_ik_failures += 1
+                            all_ok = False
+                    posture.report_ik(all_ok)
 
                 if step_count % IMU_PRINT_INTERVAL == 0:
                     print(imu.get_telemetry_string())
@@ -965,25 +1138,20 @@ def run_unified_sim(robot_id, imu, posture):
             # ── IMU acquisition (single update/tick; read BEFORE IK) ──────────
             imu.update()
             roll_deg, pitch_deg, _yaw = imu.get_euler_deg()
-            wx, wy, _wz = imu.get_angular_velocity()
+            wx, wy, wz = imu.get_angular_velocity()
 
             # ── Posture controller → per-leg Δpz corrections ──────────────────
             imu_sample = {"roll_deg": roll_deg, "pitch_deg": pitch_deg,
-                          "wx": wx, "wy": wy}
-            gait_context = {
-                "mode": mode_str,
-                "swing_leg": leg_id,
-                "support_legs": gsm.support_legs,
-                "dpz_max": POSTURE_DPZ_MAX_TURN if turning else POSTURE_DPZ_MAX_FWD,
-            }
+                          "wx": wx, "wy": wy, "wz": wz}
+            gait_context = posture_gait_context(mode_str, leg_id, phase,
+                                                gsm, turning)
             corr = posture.update(imu_sample, gait_context)
+            all_ok = True
 
             # ── CoM stabilization (forward) / raw apply (6B turning) + IK ─────
             for lid in range(1, 5):
                 base_px = foot_targets[lid]["px"]
                 base_py = foot_targets[lid]["py"]
-                # Inject posture correction: final pz = locomotion pz + Δpz
-                pz_ik   = foot_targets[lid]["pz"] + corr[lid]
 
                 if turning:
                     # Stage 6B applies foot targets directly — no CoM shift.
@@ -995,10 +1163,17 @@ def run_unified_sim(robot_id, imu, posture):
                     transient_px = base_px - (foot_targets[lid]["temp_dy"] * outward_sign)
                     transient_py = base_py - foot_targets[lid]["temp_dx"]
 
-                _, _, _, ik_ok = compute_ik(transient_px, transient_py, pz_ik)
-                if not ik_ok and lid == leg_id:
+                # Inject posture correction: final pz = locomotion pz + Δpz.
+                # Counted for ALL legs; an infeasible corrected target falls
+                # back to the pure locomotion target instead of freezing.
+                ok_c, _ = set_leg_with_posture(robot_id, lid,
+                                               transient_px, transient_py,
+                                               foot_targets[lid]["pz"],
+                                               corr[lid])
+                if not ok_c:
                     total_ik_failures += 1
-                set_leg(robot_id, lid, transient_px, transient_py, pz_ik)
+                    all_ok = False
+            posture.report_ik(all_ok)
 
             # ── IMU telemetry print ───────────────────────────────────────────
             if step_count % IMU_PRINT_INTERVAL == 0:
@@ -1099,14 +1274,24 @@ def main():
     imu.reset_yaw_reference()
     print("[IMU] Simulated IMU initialised. Yaw reference zeroed at spawn.")
 
+    # ── Hold the stand pose with the servos BEFORE the gravity settle ────────
+    # resetJointState only teleports joints; without a position command the
+    # legs are held only by PyBullet's default velocity motors and sag during
+    # settle(). The level reference below would then be captured on a sagged
+    # pose. Commanding the stand pose first makes the reference pose the one
+    # the servos actually hold.
+    for lid in range(1, 5):
+        set_leg(robot_id, lid, STAND_PX, 0.0, STAND_PZ)
+
     # ── Gravity settle at standing pose ──────────────────────────────────────
     settle(SETTLE_STEPS)
 
-    # ── Dynamic Posture Controller (Roll PD, MVP) ────────────────────────────
-    # Constructed once; capture the "flat" reference by averaging a few IMU
-    # reads right after settle so the controller's zero is the real level pose.
+    # ── Dynamic Posture Controller (Roll + Pitch PD) ──────────────────────────
+    # Level reference = IMU mounting offset, averaged over a still window on
+    # the servo-held stand pose. A large offset means a bad pose, not a mount
+    # offset → fall back to the gravity-level reference (0, 0).
     posture = PostureController()
-    n_ref = 10
+    n_ref = POSTURE_REF_SAMPLES
     sum_r = sum_p = 0.0
     for _ in range(n_ref):
         imu.update()
@@ -1114,9 +1299,15 @@ def main():
         sum_r += r0
         sum_p += p0
         p.stepSimulation()
-    posture.set_level_reference(sum_r / n_ref, sum_p / n_ref)
-    print(f"[POSTURE] Roll-PD ready. Level ref "
-          f"roll={sum_r/n_ref:+.2f}°  pitch={sum_p/n_ref:+.2f}°  "
+    ref_r, ref_p = sum_r / n_ref, sum_p / n_ref
+    if max(abs(ref_r), abs(ref_p)) > POSTURE_REF_MAX_DEG:
+        print(f"[POSTURE] WARNING: captured level ref roll={ref_r:+.2f}° "
+              f"pitch={ref_p:+.2f}° exceeds ±{POSTURE_REF_MAX_DEG}° — "
+              f"using gravity level (0, 0) instead.")
+        ref_r, ref_p = 0.0, 0.0
+    posture.set_level_reference(ref_r, ref_p)
+    print(f"[POSTURE] Roll+Pitch PD ready. Level ref "
+          f"roll={ref_r:+.2f}°  pitch={ref_p:+.2f}°  "
           f"(enabled={POSTURE_ENABLED})")
 
     # ── Run infinite loop ─────────────────────────────────────────────────────
